@@ -1,8 +1,8 @@
 from fastapi import FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel
 from src.ai.model import TransformerModel  # Dialog
-from src.ai.codegen import CodeGenerator
-from src.math.solver import MathSolver
+from src.codegen.codegen import CodeGenerator
+from src.math.math_solver import MathSolver
 from src.finance.market_analyzer import MarketAnalyzer
 from src.finance.trading_dashboard import TradingDashboard
 from src.sysadmin.parser import SysadminParser
