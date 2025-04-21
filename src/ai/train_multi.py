@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForImageClassification, AutoModelForSequenceClassification
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from finance.market_analyzer import LSTMTCNGRU
 from src.utils.database_manager import DatabaseManager
 from logger import logger
 from config import DATA_DIR

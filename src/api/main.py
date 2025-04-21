@@ -1,21 +1,29 @@
 from fastapi import FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel
-from src.dialog.dialog import DialogModel
-from src.codegen.codegen import CodeGenerator
-from src.math.math_solver import MathSolver
+from src.ai.model import TransformerModel  # Dialog
+from src.ai.codegen import CodeGenerator
+from src.math.solver import MathSolver
 from src.finance.market_analyzer import MarketAnalyzer
-from src.sysadmin.sysadmin_manager import SysadminManager
+from src.finance.trading_dashboard import TradingDashboard
+from src.sysadmin.parser import SysadminParser
+from src.sysadmin.log_analyzer import LogAnalyzer
 from src.stream.stream_handler import StreamHandler
 from src.stream.voice_handler import VoiceHandler
 from src.network.network_manager import NetworkManager
 from src.utils.captcha_solver import CaptchaSolver
-from src.utils.web_crawler import WebCrawler
-from src.ai.rag import RAG
-from src.ai.enhanced_rag import EnhancedRAG
+from src.deepsearch.scraper import WebScraper
+from src.rag.rag import RAG
+from src.rag.reranker import Reranker
 from src.mobility.device_mobility import DeviceMobility
+from src.project.project_manager import ProjectManager
+from src.project.learning_path import LearningPath
+from src.project.collaboration import Collaboration
+from src.project.security import SecurityAnalyzer
+from src.health.opencv_analyzer import OpenCVAnalyzer
+from src.health.health_recommender import HealthRecommender
 from logger import logger
 
-app = FastAPI(title="Athala Adjutor API")
+app = FastAPI(title="AI Agent Assistant API")
 
 class PromptRequest(BaseModel):
     prompt: str
@@ -40,11 +48,14 @@ class CrawlRequest(BaseModel):
 class VoiceRequest(BaseModel):
     text: str
 
+class ProjectRequest(BaseModel):
+    project_id: str
+
 @app.post("/api/dialog")
 async def dialog(request: PromptRequest):
     try:
-        dialog = DialogModel()
-        response = dialog.generate_response(request.prompt)
+        model = TransformerModel()
+        response = model.generate(request.prompt)
         return {"response": response}
     except Exception as e:
         logger.error(f"Dialog error: {e}")
@@ -80,14 +91,34 @@ async def trade(request: TradingRequest):
         logger.error(f"Trading error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/sysadmin/threats")
-async def sysadmin_threats():
+@app.post("/api/trade/dashboard")
+async def trade_dashboard(request: TradingRequest):
     try:
-        sysadmin = SysadminManager()
-        threats = sysadmin.analyze_traffic()
+        dashboard = TradingDashboard()
+        result = dashboard.generate_dashboard_data(request.data)
+        return result
+    except Exception as e:
+        logger.error(f"Trading dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/sysadmin/analyze")
+async def sysadmin_analyze():
+    try:
+        parser = SysadminParser()
+        threats = parser.analyze()
         return {"threats": threats}
     except Exception as e:
         logger.error(f"Sysadmin error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/sysadmin/logs")
+async def log_analyze():
+    try:
+        analyzer = LogAnalyzer()
+        result = analyzer.analyze_logs()
+        return {"result": result}
+    except Exception as e:
+        logger.error(f"Log analyzer error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/captcha/solve")
@@ -108,8 +139,8 @@ async def solve_captcha(request: CaptchaRequest):
 @app.post("/api/crawl")
 async def crawl(request: CrawlRequest):
     try:
-        crawler = WebCrawler()
-        result = crawler.crawl(request.component, request.url)
+        crawler = WebScraper()
+        result = crawler.scrape(request.url)
         return {"result": result}
     except Exception as e:
         logger.error(f"Crawl error: {e}")
@@ -125,14 +156,14 @@ async def rag(request: PromptRequest):
         logger.error(f"RAG error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/enhanced_rag")
-async def enhanced_rag(request: PromptRequest):
+@app.post("/api/rerank")
+async def rerank(request: PromptRequest):
     try:
-        enhanced_rag = EnhancedRAG()
-        response = enhanced_rag.generate(request.prompt)
+        reranker = Reranker()
+        response = reranker.rerank(request.prompt)
         return {"response": response}
     except Exception as e:
-        logger.error(f"Enhanced RAG error: {e}")
+        logger.error(f"Rerank error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/network/monitor")
@@ -186,6 +217,76 @@ async def voice_stream(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Voice stream error: {e}")
         raise
+
+@app.websocket("/api/video/stream")
+async def video_stream(websocket: WebSocket):
+    try:
+        await websocket.accept()
+        stream_handler = StreamHandler()
+        await stream_handler.stream_video(websocket)
+    except Exception as e:
+        logger.error(f"Video stream error: {e}")
+        raise
+
+@app.post("/api/project/manage")
+async def manage_project(request: ProjectRequest):
+    try:
+        manager = ProjectManager()
+        result = manager.manage(request.project_id)
+        return {"result": result}
+    except Exception as e:
+        logger.error(f"Project manager error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/project/learning_path")
+async def learning_path(request: PromptRequest):
+    try:
+        learning = LearningPath()
+        path = learning.generate_path(request.prompt)
+        return {"path": path}
+    except Exception as e:
+        logger.error(f"Learning path error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/project/collaborate")
+async def collaborate(request: ProjectRequest):
+    try:
+        collab = Collaboration()
+        result = collab.collaborate(request.project_id)
+        return {"result": result}
+    except Exception as e:
+        logger.error(f"Collaboration error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/project/security")
+async def security_analyze():
+    try:
+        security = SecurityAnalyzer()
+        result = security.analyze()
+        return {"result": result}
+    except Exception as e:
+        logger.error(f"Security error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/health/pose")
+async def pose_analyze():
+    try:
+        analyzer = OpenCVAnalyzer()
+        result = analyzer.analyze_pose()
+        return {"result": result}
+    except Exception as e:
+        logger.error(f"Pose analyzer error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/health/recommend")
+async def health_recommend(request: PromptRequest):
+    try:
+        recommender = HealthRecommender()
+        result = recommender.recommend(request.prompt)
+        return {"result": result}
+    except Exception as e:
+        logger.error(f"Health recommender error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

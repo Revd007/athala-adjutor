@@ -1,61 +1,32 @@
 import cv2
 import torch
-from PIL import Image
-from transformers import AutoModelForImageClassification, AutoProcessor, AutoModelForSequenceClassification
-from src.utils.browser_manager import BrowserManager
-from src.utils.database_manager import DatabaseManager
 from logger import logger
-import numpy as np
-from config import DATA_DIR
-import os
 
 class CaptchaSolver:
-    def __init__(self, image_model_path=f"{DATA_DIR}/models/yolo_captcha.pt", numeric_model_path=f"{DATA_DIR}/models/numeric_classifier.pt", text_model_path=f"{DATA_DIR}/models/text_classifier.pt"):
-        self.browser = BrowserManager()
-        self.image_processor = AutoProcessor.from_pretrained("microsoft/resnet-18")
-        self.image_model = AutoModelForImageClassification.from_pretrained(image_model_path if os.path.exists(image_model_path) else "microsoft/resnet-18")
-        self.numeric_model = AutoModelForImageClassification.from_pretrained(numeric_model_path if os.path.exists(numeric_model_path) else "microsoft/resnet-18")
-        self.text_processor = AutoProcessor.from_pretrained("bert-base-uncased")
-        self.text_model = AutoModelForSequenceClassification.from_pretrained(text_model_path if os.path.exists(text_model_path) else "bert-base-uncased")
-        self.db = DatabaseManager()
-        logger.info("CaptchaSolver initialized with pre-trained models and PostgreSQL")
+    def __init__(self, model_path="./data/models/yolo_captcha.pt"):
+        self.model = torch.hub.load('ultralytics/yolov8', 'custom', path=model_path)
 
-    def detect_captcha_type(self, driver):
+    def solve_captcha(self, driver):
+        """Solve CAPTCHA from browser screenshot."""
         try:
             screenshot = driver.get_screenshot_as_png()
             img = cv2.imdecode(np.frombuffer(screenshot, np.uint8), cv2.IMREAD_COLOR)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 100, 200)
-            if edges.sum() > 10000:
-                logger.info("Detected image-based CAPTCHA")
-                return "image"
-            logger.info("No CAPTCHA detected")
-            return None
-        except Exception as e:
-            logger.error(f"Error detecting CAPTCHA type: {str(e)}")
-            return None
+            
+            # Detect CAPTCHA objects
+            results = self.model(img)
+            detections = results.xyxy[0].numpy()  # [x1, y1, x2, y2, conf, cls]
 
-    def solve_image_captcha(self, image_path):
-        try:
-            img = cv2.imread(image_path)
-            img = cv2.resize(img, (224, 224))
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            inputs = self.image_processor(images=img, return_tensors="pt")
-            outputs = self.image_model(**inputs)
-            predicted_label = torch.argmax(outputs.logits, dim=1).item()
-            logger.info(f"Solved image CAPTCHA with label: {predicted_label}")
-            return predicted_label
-        except Exception as e:
-            logger.error(f"Error solving image CAPTCHA: {str(e)}")
-            return None
+            # Example: Click detected objects (simplified)
+            for det in detections:
+                x, y = int((det[0] + det[2]) / 2), int((det[1] + det[3]) / 2)
+                driver.execute_script(f"document.elementFromPoint({x}, {y}).click()")
 
-    def solve_text_captcha(self, text):
-        try:
-            inputs = self.text_processor(text, return_tensors="pt")
-            outputs = self.text_model(**inputs)
-            predicted_label = torch.argmax(outputs.logits, dim=1).item()
-            logger.info(f"Solved text CAPTCHA with label: {predicted_label}")
-            return predicted_label
+            logger.info("CAPTCHA solved")
+            return "Solved"
         except Exception as e:
-            logger.error(f"Error solving text CAPTCHA: {str(e)}")
-            return None
+            logger.error(f"CAPTCHA solver error: {e}")
+            raise
+
+if __name__ == "__main__":
+    # Requires browser integration
+    pass
