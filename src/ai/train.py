@@ -199,10 +199,10 @@ def prepare_data(processed_dir, include_pdf=True):
 
     # Get all JSON files
     json_summary_files = list(processed_dir.glob("summary_*.json"))
-    json_metadata_files = [f for f in processed_dir.glob("metadata_*.json") if not any(ext in f.name.lower() for ext in ['.jpg.json', '.png.json', '.jpeg.json'])]
+    json_metadata_files = list(processed_dir.glob("metadata_*.json"))
     json_files = json_summary_files + json_metadata_files
     logger.info(f"Found {len(json_summary_files)} summary JSON files.")
-    logger.info(f"Found {len(json_metadata_files)} relevant metadata JSON files.")
+    logger.info(f"Found {len(json_metadata_files)} metadata JSON files (including images).")
     logger.info(f"Total relevant JSON files found: {len(json_files)}")
 
     files_to_process = list(json_files) # Start with JSON files
