@@ -15,8 +15,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Direktori dataset
-DATASET_DIR = Path("D:/athala-adjutor/data/raw/new_dataset")
-OUTPUT_DIR = Path("D:/athala-adjutor/data/processed")
+#DATASET_DIR = Path("E:/athala-adjutor/data/raw/new_dataset")
+DATASET_DIR = Path("E:/athala-adjutor/data/processed")
+OUTPUT_DIR = Path("E:/athala-adjutor/data/processed")
 
 class DatasetManager:
     def __init__(self, dataset_dir=DATASET_DIR, output_dir=OUTPUT_DIR):
@@ -59,12 +60,12 @@ class DatasetManager:
             return {"file": str(file_path), "status": "failed", "error": str(e)}
 
     def process_pdf(self, file_path):
-        """Ekstrak teks dari PDF (maksimum 500 halaman) dan simpan."""
+        """Ekstrak teks dari PDF (maksimum 100000 halaman) dan simpan."""
         try:
             with open(file_path, "rb") as f:
                 pdf = PyPDF2.PdfReader(f)
                 total_pages = len(pdf.pages)
-                max_pages = min(total_pages, 500)  # Baca maksimum 500 halaman
+                max_pages = min(total_pages, 100000)  # Baca maksimum 500 halaman
                 text = ""
                 for page in pdf.pages[:max_pages]:
                     extracted_text = page.extract_text() or ""
@@ -218,7 +219,7 @@ Tipe File:
 
 def main(component="summary", limit=None):
     """Jalankan pengelolaan dataset berdasarkan komponen."""
-    os.chdir("D:/athala-adjutor")  # Set root proyek biar impor aman
+    os.chdir("E:/athala-adjutor")  # Set root proyek biar impor aman
     manager = DatasetManager()
     
     if component == "all":

@@ -12,7 +12,7 @@ from src.utils.web_crawler import WebCrawler
 from src.utils.database_manager import DatabaseManager
 from src.ai.train_multi import train_component
 from logger import logger
-from config import DATA_DIR, KAGGLE_CREDENTIALS
+from src.config import Config
 
 class DatasetManager:
     def __init__(self):
@@ -23,31 +23,33 @@ class DatasetManager:
         self.index = faiss.IndexFlatL2(384)
         self.components = ["dialog", "coding", "math", "trading", "captcha", "threat_intel", "network", "rag"]
         self.kaggle_api = KaggleApi()
+        self.config = Config()
+        self.DATA_DIR = self.config.DATA_DIR
         self.kaggle_api.authenticate()
         logger.info("DatasetManager initialized with PostgreSQL and Kaggle/Hugging Face support")
 
     def download_kaggle_dataset(self, dataset, component):
         try:
-            os.makedirs(f"{DATA_DIR}/raw/kaggle", exist_ok=True)
-            self.kaggle_api.dataset_download_files(dataset, path=f"{DATA_DIR}/raw/kaggle", unzip=True)
-            files = glob.glob(f"{DATA_DIR}/raw/kaggle/*.csv") + glob.glob(f"{DATA_DIR}/raw/kaggle/*.parquet")
+            os.makedirs(f"{self.DATA_DIR}/raw/kaggle", exist_ok=True)
+            self.kaggle_api.dataset_download_files(dataset, path=f"{self.DATA_DIR}/raw/kaggle", unzip=True)
+            files = glob.glob(f"{self.DATA_DIR}/raw/kaggle/*.csv") + glob.glob(f"{self.DATA_DIR}/raw/kaggle/*.parquet")
             for file in files:
                 if file.endswith(".csv"):
                     df = pd.read_csv(file)
                 else:
                     df = pd.read_parquet(file)
-                df.to_parquet(f"{DATA_DIR}/processed/{component}_kaggle.parquet")
+                df.to_parquet(f"{self.DATA_DIR}/processed/{component}_kaggle.parquet")
             logger.info(f"Downloaded Kaggle dataset: {dataset} for {component}")
         except Exception as e:
             logger.error(f"Error downloading Kaggle dataset: {str(e)}")
 
     def download_huggingface_dataset(self, dataset, component):
         try:
-            os.makedirs(f"{DATA_DIR}/raw/huggingface", exist_ok=True)
+            os.makedirs(f"{self.DATA_DIR}/raw/huggingface", exist_ok=True)
             hf_dataset = load_dataset(dataset)
             df = pd.DataFrame(hf_dataset["train"])
-            df.to_parquet(f"{DATA_DIR}/raw/huggingface/{component}_dataset.parquet")
-            df.to_parquet(f"{DATA_DIR}/processed/{component}_huggingface.parquet")
+            df.to_parquet(f"{self.DATA_DIR}/raw/huggingface/{component}_dataset.parquet")
+            df.to_parquet(f"{self.DATA_DIR}/processed/{component}_huggingface.parquet")
             logger.info(f"Downloaded Hugging Face dataset: {dataset} for {component}")
         except Exception as e:
             logger.error(f"Error downloading Hugging Face dataset: {str(e)}")
@@ -97,7 +99,7 @@ class DatasetManager:
 
     def crawl_and_store(self, queries=None, deep_web_urls=None, dark_web_urls=None):
         try:
-            os.makedirs(f"{DATA_DIR}/processed", exist_ok=True)
+            os.makedirs(f"{self.DATA_DIR}/processed", exist_ok=True)
             if queries:
                 for query, component in queries:
                     self.crawler.crawl_google(query, component)
@@ -128,8 +130,8 @@ class DatasetManager:
                     self.db.store_rag_metadata(len(embeddings), text, embedding)
                 embeddings = np.vstack([e for e in embeddings if e is not None])
                 self.index.add(embeddings)
-                faiss.write_index(self.index, f"{DATA_DIR}/processed/rag_index/index.faiss")
-                pd.DataFrame({"text": texts}).to_parquet(f"{DATA_DIR}/processed/rag_index/documents.parquet")
+                faiss.write_index(self.index, f"{self.DATA_DIR}/processed/rag_index/index.faiss")
+                pd.DataFrame({"text": texts}).to_parquet(f"{self.DATA_DIR}/processed/rag_index/documents.parquet")
                 logger.info(f"Indexed {len(texts)} crawled documents for {component}")
         except Exception as e:
             logger.error(f"Error indexing crawled data: {str(e)}")
@@ -152,14 +154,14 @@ class DatasetManager:
             duplicates = [i for i, d in enumerate(D[:, 1]) if d < 0.1]
             unique_texts = [texts[i] for i in range(len(texts)) if i not in duplicates]
             unique_df = pd.DataFrame({"text": unique_texts})
-            unique_df.to_parquet(f"{DATA_DIR}/processed/unique_crawled_data.parquet")
+            unique_df.to_parquet(f"{self.DATA_DIR}/processed/unique_crawled_data.parquet")
             logger.info(f"Deduplicated {len(texts) - len(unique_texts)} duplicates")
         except Exception as e:
             logger.error(f"Error deduplicating data: {str(e)}")
 
     def categorize_data(self):
         try:
-            df = pd.read_parquet(f"{DATA_DIR}/processed/unique_crawled_data.parquet")
+            df = pd.read_parquet(f"{self.DATA_DIR}/processed/unique_crawled_data.parquet")
             categorized = {cat: [] for cat in self.components}
             for text in df["text"]:
                 inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True)
@@ -169,14 +171,14 @@ class DatasetManager:
                 categorized[category].append(text)
             for category, texts in categorized.items():
                 cat_df = pd.DataFrame({"text": texts})
-                cat_df.to_parquet(f"{DATA_DIR}/processed/{category}_data.parquet")
+                cat_df.to_parquet(f"{self.DATA_DIR}/processed/{category}_data.parquet")
             logger.info("Data categorized")
         except Exception as e:
             logger.error(f"Error categorizing data: {str(e)}")
 
     def detect_new_datasets(self):
         try:
-            new_files = glob.glob(f"{DATA_DIR}/raw/new_dataset/*")
+            new_files = glob.glob(f"{self.DATA_DIR}/raw/new_dataset/*")
             if not new_files:
                 logger.info("No new datasets detected")
                 return None
@@ -191,7 +193,7 @@ class DatasetManager:
                 columns = df.columns.tolist()
                 logger.info(f"Dataset {file} has columns: {columns}")
                 category = self.infer_category(df)
-                df.to_parquet(f"{DATA_DIR}/processed/{category}_new.parquet")
+                df.to_parquet(f"{self.DATA_DIR}/processed/{category}_new.parquet")
                 logger.info(f"Stored new dataset as {category}_new.parquet")
             return new_files
         except Exception as e:
@@ -228,7 +230,7 @@ class DatasetManager:
             else:
                 components = [component]
             for comp in components:
-                files = glob.glob(f"{DATA_DIR}/processed/{comp}*.parquet")
+                files = glob.glob(f"{self.DATA_DIR}/processed/{comp}*.parquet")
                 df_crawled = self.db.fetch_crawled_data(comp)
                 if not files and df_crawled.empty:
                     continue
@@ -237,7 +239,7 @@ class DatasetManager:
                     dfs.append(df_crawled[["text"]])
                 df = pd.concat(dfs)
                 df = df.dropna().drop_duplicates()
-                df.to_parquet(f"{DATA_DIR}/processed/{comp}_train.parquet")
+                df.to_parquet(f"{self.DATA_DIR}/processed/{comp}_train.parquet")
                 logger.info(f"Preprocessed {comp} data")
         except Exception as e:
             logger.error(f"Error preprocessing data: {str(e)}")
@@ -247,16 +249,31 @@ class DatasetManager:
             new_datasets = self.detect_new_datasets()
             if new_datasets:
                 for file in new_datasets:
-                    df = pd.read_parquet(f"{DATA_DIR}/processed/{self.infer_category(pd.read_parquet(file))}_new.parquet")
+                    df = pd.read_parquet(f"{self.DATA_DIR}/processed/{self.infer_category(pd.read_parquet(file))}_new.parquet")
                     category = self.infer_category(df)
                     logger.info(f"Training {category} with new dataset")
-                    train_component(category, f"{DATA_DIR}/processed/{category}_train.parquet")
+                    train_component(category, f"{self.DATA_DIR}/processed/{category}_train.parquet")
                     self.db.store_update_log(category, "trained")
             else:
                 self.initialize_datasets()
                 for component in self.components:
                     self.preprocess(component)
-                    train_component(component, f"{DATA_DIR}/processed/{component}_train.parquet")
+                    train_component(component, f"{self.DATA_DIR}/processed/{component}_train.parquet")
                     self.db.store_update_log(component, "trained")
         except Exception as e:
             logger.error(f"Error auto-training: {str(e)}")
+
+    def load_processed_data(self, component):
+        '''Load processed data for a specific component.'''
+        try:
+            data_path = f'{self.DATA_DIR}/processed/{component}_train.parquet'
+            if os.path.exists(data_path):
+                df = pd.read_parquet(data_path)
+                logger.info(f'Loaded processed data for {component} from {data_path}')
+                return df
+            else:
+                logger.warning(f'No processed data found for {component} at {data_path}')
+                return pd.DataFrame()
+        except Exception as e:
+            logger.error(f'Error loading processed data for {component}: {str(e)}')
+            return pd.DataFrame()

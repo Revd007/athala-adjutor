@@ -17,14 +17,14 @@ from sklearn.metrics import precision_recall_curve, auc
 from sklearn.metrics import accuracy_score
 
 # Tambahin root proyek ke sys.path
-PROJECT_ROOT = "D:/athala-adjutor"
+PROJECT_ROOT = "E:/athala-adjutor"
 sys.path.append(PROJECT_ROOT)
 
 try:
     from src.dataset.manager import DatasetManager
 except ImportError as e:
     logging.error(f"Gagal impor DatasetManager: {e}")
-    logging.error("Pastikan D:\\athala-adjutor\\src\\dataset\\manager.py ada dan __init__.py ada di src, src/ai, src/dataset")
+    logging.error("Pastikan E:\\athala-adjutor\\src\\dataset\\manager.py ada dan __init__.py ada di src, src/ai, src/dataset")
     sys.exit(1)
 
 # Setup logging
@@ -334,7 +334,7 @@ def prepare_data(processed_dir, include_pdf=True):
 def train_model(X, y, num_epochs=30):
     """Train the classification model."""
     # Define device (CPU or GPU)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "gpu")
     logger.info(f"Using device: {device}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
@@ -380,10 +380,10 @@ def train_model(X, y, num_epochs=30):
             data, labels = data.to(device), labels.to(device)
             outputs = model(data)
             _, predicted = torch.max(outputs.data, 1)
-            all_preds.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.gpu().numpy())
+            all_labels.extend(labels.gpu().numpy())
             # Store probabilities for AUC calculations
-            probs = torch.softmax(outputs, dim=1).cpu().numpy()
+            probs = torch.softmax(outputs, dim=1).gpu().numpy()
             all_probs.extend(probs)
 
     # Convert lists to numpy arrays for sklearn metrics

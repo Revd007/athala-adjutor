@@ -9,6 +9,7 @@ from pathlib import Path  # Use pathlib for cleaner path manipulation
 import shutil
 import re  # For cleaning Wikipedia XML data
 import time
+import argparse # <-- Tambahkan import argparse
 
 # Additional imports for data generation and scraping
 import requests
@@ -22,11 +23,83 @@ import yfinance as yf
 # You may need to pip install these as well if you don't have them:
 #   pip install beautifulsoup4 requests tqdm yfinance
 
+# --- Import MetaTrader5 --- #
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    logger.warning("MetaTrader5 library not found. Trading data will rely solely on yfinance.")
+    logger.warning("Install it using: pip install MetaTrader5")
+    MT5_AVAILABLE = False
+# --- End Import --- #
+
+# --- Define Project Root and Data Dirs ---
+# Assuming PROJECT_ROOT is defined correctly as E:/athala-adjutor
+# Or derive it dynamically
+try:
+    # Navigate three levels up from the current file (__file__) to reach the project root
+    PROJECT_ROOT = Path(__file__).resolve().parents[2] 
+except IndexError:
+    # Fallback if the script is run from a different structure (e.g., project root itself)
+    PROJECT_ROOT = Path(".").resolve()
+DATA_DIR = PROJECT_ROOT / "data"
+PROCESSED_DIR = DATA_DIR / "processed"
+HF_CACHE_DIR = PROCESSED_DIR / ".cache" # Define desired cache path within processed dir
+TEMP_DIR = HF_CACHE_DIR / "temp" # Define a temporary directory within the cache
+
+logger.info(f"Project Root detected/set to: {PROJECT_ROOT}")
+logger.info(f"Data Directory set to: {DATA_DIR}")
+logger.info(f"Processed Directory set to: {PROCESSED_DIR}")
+logger.info(f"Desired Hugging Face Cache Directory: {HF_CACHE_DIR}")
+logger.info(f"Temporary Directory for this script: {TEMP_DIR}")
+
+# --- !!! SET Environment Variables !!! ---
+# Ensure the cache and temp directories exist before setting the environment variables
+try:
+    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_DIR.mkdir(parents=True, exist_ok=True) # Create the temp directory
+
+    hf_home_path_str = str(HF_CACHE_DIR.resolve()) # Get absolute path as string
+    temp_path_str = str(TEMP_DIR.resolve())
+
+    os.environ['HF_HOME'] = hf_home_path_str
+    os.environ['TRANSFORMERS_CACHE'] = hf_home_path_str
+    os.environ['HF_DATASETS_CACHE'] = hf_home_path_str # Explicitly set datasets cache
+    os.environ['TEMP'] = temp_path_str # Set TEMP for the script's process
+    os.environ['TMP'] = temp_path_str # Set TMP for the script's process
+
+    logger.info(f"Set HF_HOME environment variable to: {hf_home_path_str}")
+    logger.info(f"Set TRANSFORMERS_CACHE environment variable to: {hf_home_path_str}")
+    logger.info(f"Set HF_DATASETS_CACHE environment variable to: {hf_home_path_str}")
+    logger.info(f"Set TEMP environment variable to: {temp_path_str}")
+    logger.info(f"Set TMP environment variable to: {temp_path_str}")
+
+except Exception as e:
+    logger.error(f"Failed to create cache/temp directory or set environment variables: {e}", exc_info=True)
+    # Decide if you want to exit or continue without guaranteed caching location
+    # For now, log the error and continue, but downloads might fail or go to default location.
+# --- End Environment Variable Setting ---
+
+
+# --- Now import libraries that use the cache ---
+# Import Hugging Face datasets library *after* setting HF_HOME
+try:
+    from datasets import load_dataset
+except ImportError:
+    logger.error("Failed to import 'datasets' library. Please install it: pip install datasets")
+    # Exit if datasets library is crucial and failed to import
+    import sys
+    sys.exit("Exiting due to missing 'datasets' library.")
+# --- End Deferred Import ---
+
 class DatasetManager:
-    def __init__(self, data_dir="./data"):
+    def __init__(self, data_dir="./data", limit=None): # <-- Tambahkan limit=None
         self.data_dir = Path(data_dir)  # Store as Path object
         self.raw_dir = self.data_dir / "raw"
         self.processed_dir = self.data_dir / "processed"
+        self.limit = limit # <-- Simpan limit
+        if self.limit is not None:
+            logger.info(f"Dataset processing limit set to: {self.limit} rows per component")
 
         # Create directories if they don't exist
         self.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -93,20 +166,59 @@ class DatasetManager:
         logger.info(f"Downloading Hugging Face dataset: {dataset_name} (split: {split})")
         try:
             if cache_dir is None:
-                cache_dir = self.processed_dir / ".cache" # Store cache within processed dir
-            cache_dir.mkdir(parents=True, exist_ok=True)
+                # We rely on HF_HOME etc. set via environment variables
+                # cache_dir = self.processed_dir / ".cache"
+                pass # No need to redefine cache_dir here if env vars are set
+            # cache_dir.mkdir(parents=True, exist_ok=True)
             
-            # Ensure cache_dir is an absolute path string before passing
-            absolute_cache_dir_str = str(cache_dir.resolve())
-            logger.debug(f"Using cache directory (absolute string): {absolute_cache_dir_str}")
+            # absolute_cache_dir_str = str(cache_dir.resolve())
+            # logger.debug(f"Using cache directory (absolute string): {absolute_cache_dir_str}")
+            
+            # Log environment variable just before use for confirmation
+            logger.debug(f"HF_HOME environment variable is currently: {os.environ.get('HF_HOME')}")
+            logger.debug(f"HF_DATASETS_CACHE environment variable is currently: {os.environ.get('HF_DATASETS_CACHE')}")
+            logger.debug(f"TRANSFORMERS_CACHE environment variable is currently: {os.environ.get('TRANSFORMERS_CACHE')}")
+            logger.debug(f"TEMP environment variable is currently: {os.environ.get('TEMP')}")
+            logger.debug(f"TMP environment variable is currently: {os.environ.get('TMP')}")
+
             headers = {
                 'User-Agent': 'AthalaAdjutor/1.0 (contact@example.com)'
             }
-            dataset = load_dataset(dataset_name, split=split, cache_dir=absolute_cache_dir_str)
+            # --- Tambahkan trust_remote_code jika datasetnya adalah codeparrot --- #
+            # Determine if trust_remote_code is needed
+            trust_remote = False
+            if "codeparrot/github-code" in dataset_name or dataset_name == "daily_dialog":
+                trust_remote = True
+            # trust_remote = True if "codeparrot/github-code" in dataset_name else False # Old logic
+            
+            if trust_remote:
+                logger.warning(f"Allowing remote code execution for dataset: {dataset_name}")
+            # Remove explicit cache_dir argument, rely on HF_HOME environment variable
+            # dataset = load_dataset(dataset_name, split=split, cache_dir=absolute_cache_dir_str, trust_remote_code=trust_remote)
+            dataset = load_dataset(dataset_name, split=split, trust_remote_code=trust_remote)
+            # --- Akhir Penambahan --- #
             logger.info(f"Successfully loaded dataset: {dataset_name}")
             return dataset
         except Exception as e:
+            # Let's check the specific error for daily_dialog again
+            if dataset_name == "daily_dialog" and "trust_remote_code=True" in str(e):
+                 logger.error(f"Failed to load {dataset_name}. It requires `trust_remote_code=True`. Attempting reload with the flag.")
+                 try:
+                      # Retry specifically for daily_dialog with the flag
+                      dataset = load_dataset(dataset_name, split=split, trust_remote_code=True)
+                      logger.info(f"Successfully reloaded dataset with trust_remote_code=True: {dataset_name}")
+                      return dataset
+                 except Exception as retry_e:
+                     logger.error(f"Retry failed for {dataset_name}: {retry_e}")
+                     # Fall through to generic error logging
+            
             logger.error(f"Failed to download/load Hugging Face dataset {dataset_name}: {e}")
+            # Log the cache directory being used if error occurs
+            logger.error(f"HF_HOME environment variable was set to: {os.environ.get('HF_HOME')}")
+            logger.error(f"HF_DATASETS_CACHE environment variable was set to: {os.environ.get('HF_DATASETS_CACHE')}")
+            logger.error(f"TRANSFORMERS_CACHE environment variable was set to: {os.environ.get('TRANSFORMERS_CACHE')}")
+            logger.error(f"TEMP environment variable was set to: {os.environ.get('TEMP')}")
+            logger.error(f"TMP environment variable was set to: {os.environ.get('TMP')}")
             return None
 
     def download_kaggle_dataset(self, dataset_slug, file_name=None, unzip=True):
@@ -150,6 +262,16 @@ class DatasetManager:
             if dataset is None:
               return
 
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(dataset), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for dialog data.")
+                # Use slicing for Hugging Face datasets before converting to pandas
+                # dataset = dataset.select(range(limit_count)) # This should work
+                # Alternative if select fails for some reason:
+                indices = list(range(limit_count))
+                dataset = dataset.select(indices)
+
             df = dataset.to_pandas()
 
             # Proses data
@@ -174,7 +296,16 @@ class DatasetManager:
             if dataset is None:
               return
 
+            # Filter Python dulu sebelum limit (opsional, bisa dibalik jika perlu sampel semua bahasa)
             dataset = dataset.filter(lambda example: example['language'] == 'Python')
+            logger.info(f"Filtered for Python code. Rows remaining: {len(dataset)}")
+
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(dataset), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for coding data.")
+                dataset = dataset.select(range(limit_count))
+
             df = dataset.to_pandas()
             df.rename(columns={'code': 'content'}, inplace=True)
             df[['content']].to_parquet(str(self.processed_dir / output_filename))  # Convert Path to string
@@ -190,6 +321,12 @@ class DatasetManager:
             dataset = self.download_hf_dataset(dataset_name, split="train", cache_dir = self.processed_dir / ".cache")
             if dataset is None:
               return
+
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(dataset), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for math data.")
+                dataset = dataset.select(range(limit_count))
 
             df = dataset.to_pandas()
             df.rename(columns={'question': 'problem', 'answer': 'solution'}, inplace=True)
@@ -223,6 +360,12 @@ class DatasetManager:
             # Concatenate all DataFrames into a single DataFrame
             combined_data = pd.concat(all_data, ignore_index=True)
 
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(combined_data), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for network data.")
+                combined_data = combined_data.head(limit_count)
+
             # Save the combined data to a Parquet file
             parquet_path = self.processed_dir / output_filename
             combined_data.to_parquet(str(parquet_path))  # Convert Path to string
@@ -232,31 +375,166 @@ class DatasetManager:
             logger.error(f"Failed to process network data: {e}")
 
     def prepare_trading_data(self, output_filename="trading_train.parquet"):
-         """Prepares trading data using yfinance."""
+         """Prepares trading data using yfinance and MetaTrader5 (if available)."""
          try:
-             logger.info("Preparing trading data using yfinance...")
-             ticker = "BTC-USD"  # Bitcoin USD
-             start_date = "2023-01-01"
-             end_date = "2024-01-01"
+             logger.info("Preparing trading data using yfinance and MetaTrader5 (if available)...")
+             from datetime import datetime, timedelta
 
-             # Download data from yfinance
-             data = yf.download(ticker, start=start_date, end=end_date)
+             # --- Pisahkan Ticker untuk yfinance dan MT5 --- #
+             yfinance_tickers = [
+                 # Crypto (cocok untuk yfinance)
+                 "BTC-USD", "ETH-USD", "BNB-USD", "XRP-USD", "ADA-USD", "SOL-USD", "DOGE-USD", "DOT-USD", "MATIC-USD", "LINK-USD",
+                 # Major US Stocks (Tech)
+                 "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AMD", "INTC", "CSCO", "ORCL", "ADBE", "CRM", "QCOM", "TXN", "AVGO",
+                 # Major US Stocks (Finance)
+                 "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP", "V", "MA", "PYPL", "SQ", "COIN",
+                 # Major US Stocks (Healthcare)
+                 "JNJ", "PFE", "UNH", "MRK", "LLY", "ABBV", "TMO", "MDT", "DHR", "ABT", "BMY", "GILD",
+                 # Major US Stocks (Consumer Goods - Cyclical & Defensive)
+                 "PG", "KO", "PEP", "WMT", "COST", "HD", "NKE", "MCD", "SBUX", "TGT", "LOW", "DIS",
+                 # Major US Stocks (Energy)
+                 "XOM", "CVX", "SLB", "COP", "EOG", "MPC", "PSX",
+                 # Major US Stocks (Industrials)
+                 "GE", "BA", "CAT", "HON", "UPS", "FDX", "RTX", "LMT", "DE",
+                 # Major US Stocks (Utilities)
+                 "NEE", "DUK", "SO", "AEP", "EXC",
+                 # Major US Stocks (Real Estate)
+                 "AMT", "PLD", "EQIX", "CCI", "SPG",
+                 # Major Indices
+                 "^GSPC", "^DJI", "^IXIC", "^RUT", # US
+                 "^FTSE", "^GDAXI", "^FCHI", "^N225", "^HSI", # International
+                 # Major ETFs
+                 "SPY", "IVV", "VOO", "QQQ", "DIA", "IWM", "EFA", "IEFA", "VEA", "EEM", "VWO",
+                 "GLD", "IAU", # Gold ETFs (biarkan di yfinance sebagai alternatif)
+                 "USO", "BNO", # Oil ETFs
+                 "AGG", "BND", # Bond ETFs
+                 "ARKK", "ARKG", # Innovation ETFs
+                 # Futures (jika tersedia di yfinance)
+                 "CL=F", "GC=F", "SI=F", "HG=F", "NG=F", "ZC=F", "ZS=F", "ZW=F",
+             ] # Total ticker yfinance
 
-             # Basic preprocessing (you can add more)
-             data = data.dropna()
+             mt5_symbols = [
+                 # Forex (Gunakan format MT5)
+                 "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD",
+                 "EURGBP", "EURJPY", "GBPJPY",
+                 # Komoditas (Gunakan format MT5, contoh)
+                 "XAUUSD", # Gold
+                 "XAGUSD", # Silver
+                 # "WTI", "BRENT" # Nama bisa bervariasi tergantung broker
+             ]
+             # --- Akhir Pemisahan Ticker --- #
 
-             # Add some technical indicators (example)
-             data['SMA_20'] = data['Close'].rolling(window=20).mean()
-             data['EMA_12'] = data['Close'].ewm(span=12, adjust=False).mean()
-             data['Volatility'] = data['High'] - data['Low']
+             start_date_dt = datetime.strptime("2020-01-01", '%Y-%m-%d')
+             end_date_dt = datetime.now()
+             end_date_str = end_date_dt.strftime('%Y-%m-%d')
+
+             all_data = [] # List untuk menampung semua DataFrame
+
+             # --- Ambil data dari MetaTrader 5 --- #
+             mt5_data_frames = []
+             if MT5_AVAILABLE:
+                 mt5_initialized = False
+                 logger.info("Attempting to initialize MetaTrader 5...")
+                 try:
+                     if not mt5.initialize():
+                         logger.error(f"MetaTrader 5 initialize() failed, error code = {mt5.last_error()}")
+                         logger.warning("Ensure MT5 terminal is running and logged in.")
+                     else:
+                         mt5_initialized = True
+                         logger.info("MetaTrader 5 initialized successfully.")
+                         if mt5.terminal_info() is None:
+                             logger.error("Could not connect to MetaTrader 5 terminal.")
+                             mt5_initialized = False # Set false if connection fails
+                         else:
+                             logger.info("Connected to MetaTrader 5 terminal.")
+                             logger.info(f"Requesting MT5 data from {start_date_dt} to {end_date_dt} for symbols: {mt5_symbols}")
+                             for symbol in mt5_symbols:
+                                 try:
+                                     rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_D1, start_date_dt, end_date_dt)
+                                     if rates is None or len(rates) == 0:
+                                         logger.warning(f"No data received from MT5 for {symbol}: {mt5.last_error()}")
+                                         continue
+
+                                     df_mt5 = pd.DataFrame(rates)
+                                     df_mt5['Date'] = pd.to_datetime(df_mt5['time'], unit='s')
+                                     df_mt5.set_index('Date', inplace=True)
+                                     df_mt5.rename(columns={
+                                         'open': 'Open',
+                                         'high': 'High',
+                                         'low': 'Low',
+                                         'close': 'Close',
+                                         'tick_volume': 'Volume'
+                                     }, inplace=True)
+                                     df_mt5 = df_mt5[['Open', 'High', 'Low', 'Close', 'Volume']]
+                                     df_mt5['Symbol'] = symbol
+                                     df_mt5['SMA_20'] = df_mt5['Close'].rolling(window=20).mean()
+                                     df_mt5['EMA_12'] = df_mt5['Close'].ewm(span=12, adjust=False).mean()
+                                     df_mt5['Volatility'] = df_mt5['High'] - df_mt5['Low']
+                                     mt5_data_frames.append(df_mt5)
+                                     logger.info(f"Successfully retrieved {len(df_mt5)} records from MT5 for {symbol}")
+                                 except Exception as e_mt5:
+                                     logger.error(f"Error processing MT5 symbol {symbol}: {e_mt5}")
+                 finally:
+                     if mt5_initialized:
+                         mt5.shutdown()
+                         logger.info("MetaTrader 5 connection shut down.")
+             all_data.extend(mt5_data_frames)
+             # --- Akhir Blok MT5 --- #
+
+             # --- Ambil data dari yfinance --- #
+             logger.info(f"{len(mt5_data_frames)} dataframes collected from MT5.")
+             logger.info(f"Downloading yfinance data from {start_date_dt.strftime('%Y-%m-%d')} to {end_date_str} for {len(yfinance_tickers)} tickers.")
+             yfinance_data_frames = []
+             for ticker in yfinance_tickers:
+                 try:
+                     df_yf = yf.download(ticker, start=start_date_dt.strftime('%Y-%m-%d'), end=end_date_str)
+                     if not df_yf.empty:
+                         df_yf['Symbol'] = ticker
+                         df_yf['SMA_20'] = df_yf['Close'].rolling(window=20).mean()
+                         df_yf['EMA_12'] = df_yf['Close'].ewm(span=12, adjust=False).mean()
+                         df_yf['Volatility'] = df_yf['High'] - df_yf['Low']
+                         yfinance_data_frames.append(df_yf)
+                         logger.info(f"Successfully downloaded data using yfinance for {ticker}")
+                     else:
+                         logger.warning(f"No data found using yfinance for {ticker} between {start_date_dt.strftime('%Y-%m-%d')} and {end_date_str}")
+                 except Exception as e:
+                     logger.error(f"Error downloading ticker {ticker} using yfinance: {e}")
+             all_data.extend(yfinance_data_frames)
+             # --- Akhir Blok yfinance --- #
+
+             logger.info(f"{len(yfinance_data_frames)} dataframes collected from yfinance.")
+             logger.info(f"Total dataframes collected from all sources: {len(all_data)}")
+
+             if not all_data:
+                 logger.error("No data was downloaded from any source.")
+                 return
+
+             # Combine all data
+             combined_data = pd.concat(all_data, axis=0)
+             logger.info(f"Shape after concatenation: {combined_data.shape}")
+             combined_data = combined_data.dropna() # Drop rows with NaN from indicators
+             logger.info(f"Shape after dropping NaNs: {combined_data.shape}")
+
+             # Final check if data remains after cleaning
+             if combined_data.empty:
+                 logger.error("No data remaining after cleaning (dropping NaNs). Cannot save trading data.")
+                 return
+
+             # Terapkan limit jika ada
+             if self.limit is not None and len(combined_data) > self.limit:
+                 limit_count = self.limit
+                 logger.info(f"Applying limit: Selecting first {limit_count} rows for combined trading data.")
+                 combined_data = combined_data.head(limit_count)
+             elif self.limit is not None:
+                 logger.info(f"Limit ({self.limit}) is greater than or equal to the number of rows ({len(combined_data)}), no limiting applied for trading data.")
 
              # Save to parquet
              parquet_path = self.processed_dir / output_filename
-             data.to_parquet(str(parquet_path))
-             logger.info(f"Trading data saved to: {parquet_path}")
+             combined_data.to_parquet(str(parquet_path))
+             logger.info(f"Combined trading data saved to: {parquet_path}")
 
          except Exception as e:
-             logger.error(f"Error downloading or processing trading data: {e}")
+             logger.error(f"Error in prepare_trading_data: {e}", exc_info=True)
 
     def prepare_captcha_data(self, dataset_slug="google-street-view-house-numbers", output_filename="captcha_train.parquet"):
         """Prepares CAPTCHA data from Kaggle."""
@@ -281,6 +559,12 @@ class DatasetManager:
                 return
 
             parquet_path = self.processed_dir / output_filename
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(df), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for captcha data.")
+                df = df.head(limit_count)
+
             df.to_parquet(str(parquet_path))
             logger.info(f"CAPTCHA data saved to: {parquet_path}")
 
@@ -348,92 +632,90 @@ class DatasetManager:
 
             df = pd.DataFrame(all_posts)
             df['text'] = df['title'] + '\n' + df['selftext']  # Combine title and text
+
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(df), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for Reddit data.")
+                df = df.head(limit_count)
+
             df[['text']].to_parquet(str(self.processed_dir / output_filename))
             logger.info(f"Reddit conversations saved to {output_filename}")
 
         except Exception as e:
             logger.error(f"Error extracting Reddit conversations: {e}")
 
-    def prepare_wikipedia_gutenberg(self, wikipedia_dump_url="https://dumps.wikimedia.org/enwiki/latest/enwiki-latest-pages-articles.xml.bz2", gutenberg_dir="./data/gutenberg", output_filename="wikipedia_gutenberg.parquet"):
-        """Combine Wikipedia dump with Project Gutenberg books."""
+    def prepare_wikipedia_data(self, output_filename="wikipedia_train.parquet"):
+        """Fetches Wikipedia articles via API."""
         try:
-            logger.info("Combining Wikipedia dump and Project Gutenberg books.")
+            logger.info("Fetching Wikipedia articles via API.")
 
-            # Wikipedia (Simplified Example - requires downloading and cleaning the dump)
-            #  This is a *highly* simplified example. Processing the full Wikipedia XML dump is complex.
-            #  This snippet just fetches a few articles directly.  You'd need to use a proper XML parser (e.g., `xml.etree.ElementTree`) and handle the bz2 decompression.
-            #  For large-scale Wikipedia processing, consider using dedicated libraries like `wikiextractor`.
             wikipedia_articles = []
-            # Fetch some example wikipedia pages
+            # Daftar judul bisa diperbanyak jika perlu sampel lebih besar
             example_titles = [
-                # Technology
+                # ... (Daftar judul yang sudah ada) ...
                 "Artificial intelligence", "Machine learning", "Computer science",
                 "Internet", "Digital technology", "Robotics",
-                # History
                 "World War II", "Ancient Egypt", "Roman Empire",
                 "Industrial Revolution", "Renaissance", "French Revolution",
                 "American Civil War", "Cold War", "Ancient Greece",
-                # Science
-                "Physics", "Chemistry", "Biology", 
+                "Physics", "Chemistry", "Biology",
                 "Astronomy", "Evolution", "Quantum mechanics",
-                # Arts & Culture
                 "Classical music", "Renaissance art", "Modern art",
                 "Literature", "Theatre", "Film history",
-                # Philosophy
                 "Western philosophy", "Eastern philosophy", "Ethics",
-                # Social Sciences
                 "Psychology", "Sociology", "Economics",
                 "Political science", "Anthropology", "Archaeology",
-                # Religion
                 "Buddhism", "Christianity", "Islam",
                 "Hinduism", "Judaism", "World religions",
-                # Geography
                 "Physical geography", "Human geography", "Climate",
-                # Mathematics
                 "Mathematics", "Geometry", "Algebra",
-                # Medicine
                 "Medicine", "Human anatomy", "Public health",
-                # Other
                 "Architecture", "Engineering", "Agriculture",
                 "Education", "Sports", "Food science"
+                # Tambahkan judul lain di sini jika perlu
             ]
-            for title in example_titles:
+            logger.info(f"Fetching {len(example_titles)} sample articles from Wikipedia API...")
+            for title in tqdm(example_titles, desc="Fetching Wikipedia Articles"):
                 try:
-                    response = requests.get(f"https://en.wikipedia.org/w/api.php?action=query&format=json&titles={title}&prop=extracts&explaintext")
-                    response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+                    # Gunakan User-Agent yang baik
+                    headers = {'User-Agent': 'AthalaAdjutor/1.0 (Data Collection Script; contact@example.com)'}
+                    response = requests.get(f"https://en.wikipedia.org/w/api.php?action=query&format=json&titles={title}&prop=extracts&exintro&explaintext", headers=headers)
+                    response.raise_for_status()
                     data = response.json()
-                    page = next(iter(data['query']['pages'].values())) # Get the page content
-                    wikipedia_articles.append({"title": title, "text": page['extract']}) # add page extract to text
+                    page_id = next(iter(data['query']['pages']))
+                    page = data['query']['pages'][page_id]
+                    # Pastikan ada teks ekstrak
+                    if 'extract' in page and page['extract']:
+                        wikipedia_articles.append({"title": page.get('title', title), "text": page['extract']})
+                    else:
+                        logger.warning(f"No extract found for Wikipedia article '{title}'. Page data: {page}")
                 except requests.exceptions.RequestException as e:
                     logger.warning(f"Error fetching Wikipedia article '{title}': {e}")
+                time.sleep(0.1) # Jeda sopan agar tidak membebani API
+
+            if not wikipedia_articles:
+                 logger.error("No Wikipedia articles could be fetched. Skipping.")
+                 return
+
             wikipedia_df = pd.DataFrame(wikipedia_articles)
             wikipedia_df['source'] = "Wikipedia"
 
-            # Gutenberg (Simplified Example)
-            # This assumes you have downloaded Project Gutenberg books (e.g., as text files) into the `gutenberg_dir`.
-            # You would likely need to do further cleaning and metadata extraction.
-            gutenberg_texts = []
-            if Path(gutenberg_dir).exists():
-                for file_path in Path(gutenberg_dir).glob("*.txt"):
-                    try:
-                        with open(file_path, "r", encoding="utf-8", errors='ignore') as f:
-                            text = f.read()
-                            gutenberg_texts.append({"title": file_path.name, "text": text})
-                    except Exception as e:
-                        logger.warning(f"Error reading Gutenberg book {file_path}: {e}")
-            gutenberg_df = pd.DataFrame(gutenberg_texts)
-            gutenberg_df['source'] = "Gutenberg"
+            # --- Proses hanya DataFrame Wikipedia --- #
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(wikipedia_df), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for Wikipedia data.")
+                wikipedia_df = wikipedia_df.head(limit_count)
 
-            # Combine and save
-            combined_df = pd.concat([wikipedia_df, gutenberg_df], ignore_index=True)
-            combined_df.to_parquet(str(self.processed_dir / output_filename))
-            logger.info(f"Combined Wikipedia/Gutenberg data saved to {output_filename}")
+            wikipedia_df.to_parquet(str(self.processed_dir / output_filename))
+            logger.info(f"Wikipedia data saved to {output_filename}")
 
         except Exception as e:
-            logger.error(f"Error combining Wikipedia/Gutenberg data: {e}")
+            logger.error(f"Error preparing Wikipedia data: {e}", exc_info=True)
 
     def prepare_stack_overflow(self, archive_url="https://archive.org/download/stackexchange/stackoverflow.com-Posts.7z", output_filename="stackoverflow.parquet"):
-        """Extract Stack Overflow data from Internet Archive.  This is a stub.
+        """Extract Stack Overflow data from Internet Archive. This is a stub.
         Due to the size and complexity of the Stack Overflow archive, this requires more advanced processing.
         Consider using tools like 7-Zip to extract the XML files, then using an XML parser to extract the relevant data.
         This is left as a placeholder due to the complexity.
@@ -471,28 +753,58 @@ class DatasetManager:
         try:
             logger.info(f"Scraping IMO problem shortlists ({start_year}-{end_year})")
             all_problems = []
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
             for year in tqdm(range(start_year, end_year + 1), desc="Processing Years"):
                 url = f"https://www.imo-official.org/problems.aspx?yr={year}"
                 try:
-                    response = requests.get(url)
+                    response = requests.get(url, headers=headers)
                     response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
                     soup = BeautifulSoup(response.content, 'html.parser')
 
                     # Adjust the selector based on the actual website structure. Inspect the website!
-                    problem_tables = soup.find_all('table', class_='problem-table')  # Example class name
+                    # --- USER VERIFICATION NEEDED for Selectors --- #
+                    # Example: Inspect the page for year 2023 and find the correct table/row/cell tags and classes.
+                    problem_tables_selector = 'table.problems' # Example: Find tables with class 'problems' (NEEDS VERIFICATION)
+                    row_selector = 'tr'                   # Example: Find all table rows (NEEDS VERIFICATION)
+                    cell_index_problem = 0             # Example: Problem text is in the first cell (index 0) (NEEDS VERIFICATION)
+                    # cell_index_solution = 1            # Example: Solution text is in the second cell (index 1) (NEEDS VERIFICATION)
+                    # --- END USER VERIFICATION NEEDED --- #
 
-                    for table in problem_tables:
+                    problem_tables = soup.select(problem_tables_selector)
+                    logger.debug(f"Year {year}: Found {len(problem_tables)} elements matching selector '{problem_tables_selector}'")
+
+                    for table_index, table in enumerate(problem_tables):
+                        rows = table.select(row_selector)
+                        logger.debug(f"  Table {table_index}: Found {len(rows)} elements matching selector '{row_selector}'")
+                        rows_processed = 0
                         for row in table.find_all('tr'):
                             cells = row.find_all('td')
-                            if len(cells) == 2: # Assuming each row has two cells (Problem and Solution/Answer)
+                            # Ensure we have enough cells based on expected indices
+                            if len(cells) > cell_index_problem: # Check if the problem cell index exists
                                 problem = cells[0].text.strip()
                                 #answer = cells[1].text.strip() # uncomment if solution is present and needs to be extracted
                                 all_problems.append({"year": year, "problem": problem})  # , "solution": answer})
+                                rows_processed += 1
+                            #else: # Optional: Log rows that don't have enough cells
+                            #    logger.debug(f"    Row skipped: Found {len(cells)} cells, expected at least {max(cell_index_problem, cell_index_solution) + 1}")
+                        logger.debug(f"  Table {table_index}: Successfully processed {rows_processed} rows.")
 
                 except requests.exceptions.RequestException as e:
                     logger.warning(f"Error fetching IMO problems for {year}: {e}")
 
+            logger.info(f"Total problems scraped from all years: {len(all_problems)}")
+
+            if not all_problems:
+                logger.error("No problems were scraped from the IMO website. Cannot save IMO data.")
+                return
+
             df = pd.DataFrame(all_problems)
+            # Terapkan limit jika ada
+            if self.limit is not None:
+                limit_count = min(len(df), self.limit)
+                logger.info(f"Applying limit: Selecting first {limit_count} rows for IMO data.")
+                df = df.head(limit_count)
+
             df.to_parquet(str(self.processed_dir / output_filename))
             logger.info(f"IMO problems saved to {output_filename}")
 
@@ -530,7 +842,12 @@ class DatasetManager:
     def generate_bin_attack_data(self, num_records=100000, output_filename="bin_attack_data.parquet"):
         """Generates synthetic credit card data for BIN attacks."""
         try:
-            logger.info(f"Generating {num_records} synthetic credit card records for BIN attacks.")
+            # Sesuaikan jumlah record dengan limit jika ada
+            if self.limit is not None:
+                num_records = min(num_records, self.limit)
+                logger.info(f"Generating limited number of BIN attack records: {num_records}")
+            else:
+                 logger.info(f"Generating {num_records} synthetic credit card records for BIN attacks.")
 
             # Sample BIN issuers (replace with a more comprehensive list)
             bin_issuers = ["411111", "522222", "377777"]
@@ -577,8 +894,13 @@ class DatasetManager:
     def generate_deepfake_financial_profiles(self, num_profiles=100, output_filename="deepfake_profiles.parquet"):
         """Menggunakan model lokal untuk generate data finansial"""
         try:
-            logger.info(f"Generating {num_profiles} synthetic financial profiles using local models")
-            
+            # Sesuaikan jumlah profil dengan limit jika ada
+            if self.limit is not None:
+                num_profiles = min(num_profiles, self.limit)
+                logger.info(f"Generating limited number of financial profiles: {num_profiles}")
+            else:
+                 logger.info(f"Generating {num_profiles} synthetic financial profiles using local models")
+
             # Ganti dengan model lokal (contoh: GPT-Neo)
             from transformers import pipeline
             generator = pipeline('text-generation', model='EleutherAI/gpt-neo-125M')
@@ -699,29 +1021,38 @@ class DatasetManager:
         """Downloads and prepares all necessary training datasets."""
         logger.info("Starting preparation of all training datasets...")
         self.prepare_dialog_data()
-        self.prepare_coding_data()
+        # --- Aktifkan kembali prepare_coding_data --- #
+        logger.warning("Preparing coding data (codeparrot/github-code). This dataset is very large and may take a long time and significant disk space (cache). Use --limit argument.")
+        #self.prepare_coding_data() 
+        # --- Akhir Aktivasi --- #
         self.prepare_math_data()
         self.prepare_network_data()
-        self.prepare_trading_data()
+        self.prepare_trading_data() # Sekarang menggunakan MT5 + yfinance
         self.prepare_captcha_data()
         self.prepare_threat_intel_data()
         self.prepare_rag_data()
 
         # New methods:
         self.prepare_reddit_conversations()
-        self.prepare_wikipedia_gutenberg()
+        self.prepare_wikipedia_data()
         self.prepare_stack_overflow()
         self.prepare_github_codeparrot_plus()
         self.prepare_lean4_theorem_proving()
         self.prepare_imo_shortlists()
-        self.prepare_cic_darknet2020()
+        #self.prepare_cic_darknet2020()
         self.prepare_malware_dna_db()
 
         logger.info("Finished preparation of training datasets.")
 
 
 if __name__ == "__main__":
+    # <-- Tambahkan ArgParse -->
+    parser = argparse.ArgumentParser(description="Download and prepare various training datasets.")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Maximum number of rows to process and save for each dataset component.")
+    args = parser.parse_args()
+    # <-- Akhir Tambahan ArgParse -->
 
-    # Initialize and run the DatasetManager
-    manager = DatasetManager()
+    # Initialize and run the DatasetManager with the limit from args
+    manager = DatasetManager(data_dir=str(DATA_DIR), limit=args.limit) # <-- Berikan limit ke konstruktor
     manager.prepare_all_training_data()

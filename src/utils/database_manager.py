@@ -2,11 +2,12 @@ import psycopg2
 import pandas as pd
 import numpy as np
 from logger import logger
-from config import POSTGRES_CONFIG
+from src.config import Config
 
 class DatabaseManager:
     def __init__(self):
-        self.conn = psycopg2.connect(**POSTGRES_CONFIG)
+        config = Config()
+        self.conn = psycopg2.connect(**config.get("db_config"))
         self.cursor = self.conn.cursor()
         self.create_tables()
         logger.info("DatabaseManager initialized with PostgreSQL")
