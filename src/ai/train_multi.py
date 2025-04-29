@@ -47,6 +47,7 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+from transformers import EarlyStoppingCallback
 
 # --- Konfigurasi File Logging ---
 log_filename = f"training_log_{time.strftime('%Y%m%d_%H%M%S')}.txt"
@@ -169,36 +170,124 @@ def train_component(component, data_path):
             texts = df['text'].fillna('').tolist()
             if not texts: logger.error('No text data found in dialog file.'); return None
 
+            # Split data into train and validation sets
+            train_texts, val_texts = train_test_split(texts, test_size=0.1, random_state=42)
+            logger.info(f'Split data into {len(train_texts)} training and {len(val_texts)} validation samples')
+
+            # Initialize tokenizer and model with custom name
             tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
             if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
             model = GPT2LMHeadModel.from_pretrained('gpt2')
-            train_dataset = HFTextDataset(tokenizer, texts) # Latih dengan semua data
+            
+            # Set custom model name
+            model.config.name_or_path = "Donquixote Athala"
+            model.config.model_type = "gpt2"
+            model.config.architectures = ["GPT2LMHeadModel"]
+            
+            # Create datasets
+            train_dataset = HFTextDataset(tokenizer, train_texts)
+            val_dataset = HFTextDataset(tokenizer, val_texts)
 
+            # Training arguments for dialog (GPT-2)
             training_args = TrainingArguments(
                 output_dir=str(model_output_dir),
-                num_train_epochs=1,
-                per_device_train_batch_size=2,
-                gradient_accumulation_steps=4,
-                save_steps=1000,
-                save_total_limit=2,
+                num_train_epochs=10,
+                per_device_train_batch_size=1,
+                per_device_eval_batch_size=1,
+                gradient_accumulation_steps=32,
+                learning_rate=3e-5,
+                weight_decay=0.01,
+                warmup_steps=500,
+                fp16=True,
+                gradient_checkpointing=True,
+                save_steps=500,
                 logging_steps=100,
-                fp16=torch.cuda.is_available(),
+                save_total_limit=2,
                 report_to='none',
+                # Evaluasi dengan parameter yang kompatibel
+                eval_steps=500,
+                # Optimasi
+                optim="adamw_torch",
+                lr_scheduler_type="linear",
+                max_grad_norm=1.0,
             )
-            trainer = Trainer(model=model, args=training_args, train_dataset=train_dataset)
+
+            # Buat trainer dengan konfigurasi yang lebih lengkap
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=val_dataset,
+                compute_metrics=lambda eval_pred: {
+                    "perplexity": torch.exp(torch.tensor(eval_pred.predictions)).mean().item(),
+                    "eval_loss": eval_pred.predictions.mean().item()
+                }
+            )
+
             logger.info('Starting dialog model training...')
-            trainer.train()
-            trainer.save_model() # Simpan model akhir ke output_dir
-            # Opsional: Simpan state_dict ke path spesifik jika perlu
-            # torch.save(model.state_dict(), model_save_dir / 'dialog_model.pt')
-            logger.info(f'Dialog model training complete. Model saved in {model_output_dir}')
+            # Tambahkan evaluasi manual
+            best_eval_loss = float('inf')
+            best_model_path = None
+            
+            for epoch in range(training_args.num_train_epochs):
+                # Training
+                train_result = trainer.train()
+                train_loss = train_result.training_loss
+                
+                # Evaluasi
+                eval_result = trainer.evaluate()
+                eval_loss = eval_result['eval_loss']
+                perplexity = eval_result['perplexity']
+                
+                logger.info(f'Epoch {epoch + 1}:')
+                logger.info(f'  Train Loss: {train_loss:.4f}')
+                logger.info(f'  Eval Loss: {eval_loss:.4f}')
+                logger.info(f'  Perplexity: {perplexity:.4f}')
+                
+                # Simpan model terbaik
+                if eval_loss < best_eval_loss:
+                    best_eval_loss = eval_loss
+                    best_model_path = model_output_dir / f"best_model_epoch_{epoch + 1}"
+                    trainer.save_model(best_model_path)
+                    logger.info(f'  New best model saved at {best_model_path}')
+            
+            # Load model terbaik
+            if best_model_path:
+                model = model.from_pretrained(best_model_path)
+                logger.info(f'Loaded best model from {best_model_path}')
+            
+            # Save model with custom name and metadata
+            model.save_pretrained(
+                model_output_dir / "Donquixote_Athala",
+                save_config=True,
+                save_weights=True
+            )
+            tokenizer.save_pretrained(model_output_dir / "Donquixote_Athala")
+            
+            # Simpan metrik pelatihan
             metrics = {
                 'model': model,
-                'loss': trainer.state.log_history[-1].get('train_loss', None) if trainer.state.log_history else None,
-                'epoch': trainer.state.log_history[-1].get('epoch', None) if trainer.state.log_history else None
+                'loss': train_loss,
+                'eval_loss': eval_loss,
+                'perplexity': perplexity,
+                'epoch': epoch + 1,
+                'best_model_path': str(best_model_path) if best_model_path else None,
+                'training_config': {
+                    'batch_size': training_args.per_device_train_batch_size,
+                    'gradient_accumulation_steps': training_args.gradient_accumulation_steps,
+                    'learning_rate': training_args.learning_rate,
+                    'weight_decay': training_args.weight_decay,
+                    'warmup_steps': training_args.warmup_steps,
+                    'fp16': training_args.fp16,
+                    'model_name': "Donquixote Athala"
+                }
             }
+            
+            # Log metrik secara detail
+            logger.info(f'Training metrics: {json.dumps(metrics, indent=2)}')
             logger.info(f'--- Finished Training Attempt for Component: {component} ---')
             return metrics
+
         elif component == "coding":
             logger.info("Configuring training for Coding component...")
             data_file = Path(data_path)
@@ -214,36 +303,168 @@ def train_component(component, data_path):
             codes = df['content'].fillna('').tolist()
             if not codes: logger.error("No code data found."); return None
 
-            # Gunakan Salesforce/codegen-350M-mono
-            tokenizer = AutoTokenizer.from_pretrained("Salesforce/codegen-350M-mono")
-            model = AutoModelForCausalLM.from_pretrained("Salesforce/codegen-350M-mono")
-            if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token # CodeGen mungkin perlu ini
+            # Split data into train and validation sets
+            train_codes, val_codes = train_test_split(codes, test_size=0.1, random_state=42)
+            logger.info(f'Split data into {len(train_codes)} training and {len(val_codes)} validation samples')
 
-            train_dataset = HFTextDataset(tokenizer, codes)
+            # Initialize Phi-1.5 model with LoRA
+            tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-1_5")
+            model = AutoModelForCausalLM.from_pretrained("microsoft/phi-1_5")
+            
+            # Set custom model name
+            model.config.name_or_path = "Donquixote Athala"
+            model.config.model_type = "phi"
+            model.config.architectures = ["PhiForCausalLM"]
 
+            # Configure LoRA
+            from peft import LoraConfig, get_peft_model
+            lora_config = LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["q_proj", "v_proj"],
+                lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM"
+            )
+            model = get_peft_model(model, lora_config)
+            
+            # Create datasets
+            train_dataset = HFTextDataset(tokenizer, train_codes)
+            val_dataset = HFTextDataset(tokenizer, val_codes)
+
+            # Training arguments for coding (Phi-1.5 with LoRA)
             training_args = TrainingArguments(
                 output_dir=str(model_output_dir),
-                num_train_epochs=1, # Sesuaikan
-                per_device_train_batch_size=1, # Model besar, batch kecil
-                gradient_accumulation_steps=8,
+                num_train_epochs=5,
+                per_device_train_batch_size=1,
+                per_device_eval_batch_size=1,
+                gradient_accumulation_steps=16,
+                learning_rate=2e-5,
+                weight_decay=0.01,
+                warmup_steps=500,
+                fp16=True,
+                gradient_checkpointing=True,
                 save_steps=500,
+                logging_steps=100,
                 save_total_limit=2,
-                logging_steps=50,
-                fp16=torch.cuda.is_available(),
-                report_to="none",
+                report_to='none',
             )
-            trainer = Trainer(model=model, args=training_args, train_dataset=train_dataset)
+
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=val_dataset,
+                compute_metrics=lambda eval_pred: {"perplexity": torch.exp(torch.tensor(eval_pred.predictions)).mean().item()}
+            )
+
             logger.info("Starting coding model training...")
             trainer.train()
             trainer.save_model()
+            
+            # Save model with custom name
+            model.save_pretrained(model_output_dir / "Donquixote_Athala")
+            tokenizer.save_pretrained(model_output_dir / "Donquixote_Athala")
+            
             logger.info(f"Coding model training complete. Model saved in {model_output_dir}")
             metrics = {
                 'model': model,
                 'loss': trainer.state.log_history[-1].get('train_loss', None) if trainer.state.log_history else None,
+                'eval_loss': trainer.state.log_history[-1].get('eval_loss', None) if trainer.state.log_history else None,
+                'perplexity': trainer.state.log_history[-1].get('perplexity', None) if trainer.state.log_history else None,
                 'epoch': trainer.state.log_history[-1].get('epoch', None) if trainer.state.log_history else None
             }
             logger.info(f'--- Finished Training Attempt for Component: {component} ---')
             return metrics
+
+        elif component == "general":
+            logger.info("Configuring training for General Purpose component...")
+            data_file = Path(data_path)
+            model_output_dir = model_save_dir / "general_model"
+            model_output_dir.mkdir(parents=True, exist_ok=True)
+
+            if not data_file.exists():
+                logger.error(f"Data file not found: {data_file}. Skipping general training.")
+                return None
+
+            df = pd.read_parquet(data_file)
+            texts = df['text'].fillna('').tolist()
+            if not texts: logger.error("No text data found."); return None
+
+            # Split data into train and validation sets
+            train_texts, val_texts = train_test_split(texts, test_size=0.1, random_state=42)
+            logger.info(f'Split data into {len(train_texts)} training and {len(val_texts)} validation samples')
+
+            # Initialize Mistral-7B with LoRA
+            tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+            model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1")
+            
+            # Set custom model name
+            model.config.name_or_path = "Donquixote Athala"
+            model.config.model_type = "mistral"
+            model.config.architectures = ["MistralForCausalLM"]
+
+            # Configure LoRA
+            from peft import LoraConfig, get_peft_model
+            lora_config = LoraConfig(
+                r=8,
+                lora_alpha=16,
+                target_modules=["q_proj", "v_proj"],
+                lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM"
+            )
+            model = get_peft_model(model, lora_config)
+            
+            # Create datasets
+            train_dataset = HFTextDataset(tokenizer, train_texts)
+            val_dataset = HFTextDataset(tokenizer, val_texts)
+
+            # Training arguments for general purpose (Mistral-7B with LoRA)
+            training_args = TrainingArguments(
+                output_dir=str(model_output_dir),
+                num_train_epochs=5,
+                per_device_train_batch_size=1,
+                per_device_eval_batch_size=1,
+                gradient_accumulation_steps=32,
+                learning_rate=2e-5,
+                weight_decay=0.01,
+                warmup_steps=500,
+                fp16=True,
+                gradient_checkpointing=True,
+                save_steps=500,
+                logging_steps=100,
+                save_total_limit=2,
+                report_to='none',
+            )
+
+            trainer = Trainer(
+                model=model,
+                args=training_args,
+                train_dataset=train_dataset,
+                eval_dataset=val_dataset,
+                compute_metrics=lambda eval_pred: {"perplexity": torch.exp(torch.tensor(eval_pred.predictions)).mean().item()}
+            )
+
+            logger.info("Starting general purpose model training...")
+            trainer.train()
+            trainer.save_model()
+            
+            # Save model with custom name
+            model.save_pretrained(model_output_dir / "Donquixote_Athala")
+            tokenizer.save_pretrained(model_output_dir / "Donquixote_Athala")
+            
+            logger.info(f"General purpose model training complete. Model saved in {model_output_dir}")
+            metrics = {
+                'model': model,
+                'loss': trainer.state.log_history[-1].get('train_loss', None) if trainer.state.log_history else None,
+                'eval_loss': trainer.state.log_history[-1].get('eval_loss', None) if trainer.state.log_history else None,
+                'perplexity': trainer.state.log_history[-1].get('perplexity', None) if trainer.state.log_history else None,
+                'epoch': trainer.state.log_history[-1].get('epoch', None) if trainer.state.log_history else None
+            }
+            logger.info(f'--- Finished Training Attempt for Component: {component} ---')
+            return metrics
+
         elif component == "math":
             logger.info("Configuring training for Math component...")
             data_file = Path(data_path)
@@ -269,7 +490,7 @@ def train_component(component, data_path):
 
             training_args = TrainingArguments(
                 output_dir=str(model_output_dir),
-                num_train_epochs=3, # Flan-T5 mungkin perlu lebih banyak epoch
+                num_train_epochs=10, # Flan-T5 mungkin perlu lebih banyak epoch
                 per_device_train_batch_size=4, # Sesuaikan
                 gradient_accumulation_steps=4,
                 save_steps=500,
@@ -468,7 +689,7 @@ def train_component(component, data_path):
 
             training_args = TrainingArguments(
                 output_dir=str(model_output_dir),
-                num_train_epochs=1, # Sesuaikan
+                num_train_epochs=10, # Sesuaikan
                 per_device_train_batch_size=2,
                 gradient_accumulation_steps=4,
                 save_steps=1000,
